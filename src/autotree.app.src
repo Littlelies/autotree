@@ -1,0 +1,16 @@
+{application, autotree,
+ [{description, "AUTOmatically create a TREE and manage subscribers as pids"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { autotree_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
