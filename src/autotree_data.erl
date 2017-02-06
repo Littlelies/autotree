@@ -26,6 +26,9 @@
 -define(ETS_BAG_INDEX, autotree_data_bag_index).
 -define(ETS_SET, autotree_data_set).
 
+%% @todo: lookups happen independently, so we should try to group set operations
+%% @todo: performance would be improved by reducing the amount of lists:reverse
+
 %% ===================================================================
 %% API functions
 %% ===================================================================
@@ -122,18 +125,33 @@ update_at_each_step([Element | Elements0], Timestamp, Opaque, IsFirst, ShallCont
                                     add_in_bag({Elements, Element, Timestamp, CurrentChildrenTimestamp}, FullElements),
                                     delete_in_bag(OldElement),
                                     true;
+                                CurrentTimestamp =:= Timestamp ->
+                                    [{_, _, OldOpaque}] = ets:lookup(?ETS_SET, FullElements),
+                                    if
+                                        OldOpaque < Opaque ->
+                                            FullElements = Elements ++ [Element],
+                                            ets:insert(?ETS_SET, {FullElements, Timestamp, Opaque}),
+                                            add_in_bag({Elements, Element, Timestamp, CurrentChildrenTimestamp}, FullElements),
+                                            delete_in_bag(OldElement),
+                                            true;
+                                        true ->
+                                            %% Another update is more recent at this topic, drop it
+                                            drop
+                                    end;
                                 true ->
                                     %% Another update is more recent at this topic, drop it
                                     drop
                             end;
-                        CurrentChildrenTimestamp < Timestamp ->
+                        CurrentChildrenTimestamp > Timestamp ->
+                            %% The rest is necessarily newer, drop it.
+                            %% This use case is DANGEROUS for clients,
+                            %% as they may be confused getting events out of order
+                            %% We continue the browsing to still alert clients
+                            false;
+                        true ->
                             add_in_bag({Elements, Element, CurrentTimestamp, Timestamp}, FullElements),
                             delete_in_bag(OldElement),
-                            true;
-                        true ->
-                            %% The rest is necessarily newer, drop it.
-                            %% This use case is DANGEROUS for clients, as they may be confused getting events out of order
-                            false
+                            true
                     end
             end;
         false ->

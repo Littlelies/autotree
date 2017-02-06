@@ -23,6 +23,11 @@
 %%====================================================================
 %% API
 %%====================================================================
+
+%% Updates the tree, warns the subscribers.
+%% WARNING: susbscribers may receive update notifications out of order for performance sake
+%% it is their responsibility to make sure the event is not outdated already,
+%% and make sure they use margin when asking for a timestamp after deconnexion
 -spec update([any()], integer(), any()) -> too_late | [{[any()], integer()}].
 update(PathAsList, Timestamp, Opaque) ->
     case autotree_data:update(PathAsList, Timestamp, Opaque) of
