@@ -128,7 +128,7 @@ update_at_each_step([Element | Elements0], Timestamp, Opaque, IsFirst, ShallCont
                                 CurrentTimestamp =:= Timestamp ->
                                     [{_, _, OldOpaque}] = ets:lookup(?ETS_SET, FullElements),
                                     if
-                                        OldOpaque < Opaque ->
+                                        OldOpaque < Opaque -> % http://erlang.org/doc/reference_manual/expressions.html#id81088
                                             FullElements = Elements ++ [Element],
                                             ets:insert(?ETS_SET, {FullElements, Timestamp, Opaque}),
                                             add_in_bag({Elements, Element, Timestamp, CurrentChildrenTimestamp}, FullElements),
