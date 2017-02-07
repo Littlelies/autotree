@@ -76,6 +76,10 @@ stop(_State) ->
 %%====================================================================
 -ifdef(TEST).
 autotree_subs_test() ->
+    application:start(syntax_tools),
+    application:start(compiler),
+    application:start(goldrush),
+    application:start(lager),
     application:start(autotree),
     Pid = spawn(fun() -> timer:sleep(200) end),
     autotree_subs:add_subscriber([<<"toto">>], Pid),
@@ -89,6 +93,10 @@ autotree_subs_test() ->
 
 
 autotree_data_test() ->
+    application:start(syntax_tools),
+    application:start(compiler),
+    application:start(goldrush),
+    application:start(lager),
     application:start(autotree),
     {It, _ } = update(["toto", "titi", "tata", "item1"], {1, test1}),
     update(["toto", "titi", "tata", "item2"], {2, test2}),
