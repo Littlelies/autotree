@@ -8,9 +8,9 @@
 -behaviour(application).
 
 -export([
-    update/3,
+    update/2,
     subscribe/3,
-    get_timestamp_and_opaque/1
+    get_iteration_and_opaque/1
 ]).
 
 %% Application callbacks
@@ -20,6 +20,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-type iteration() :: integer().
+-export_type([iteration/0]).
 %%====================================================================
 %% API
 %%====================================================================
@@ -28,24 +30,28 @@
 %% WARNING: susbscribers may receive update notifications out of order for performance sake
 %% it is their responsibility to make sure the event is not outdated already,
 %% and make sure they use margin when asking for a timestamp after deconnexion
--spec update([any()], integer(), any()) -> too_late | [{[any()], integer()}].
-update(PathAsList, Timestamp, Opaque) ->
-    case autotree_data:update(PathAsList, Timestamp, Opaque) of
-        drop ->
+
+%% @todo: instead of timestamp, use a version number, so we can make sure it is monotonically increasing
+-spec update([any()], any()) -> too_late | {iteration(), [{[any()], integer()}]}.
+update(PathAsList, Opaque) ->
+    case autotree_data:update(PathAsList, Opaque) of
+        {_Iteration, drop} ->
             too_late;
-        AllPaths ->
-            [autotree_subs:warn_subscribers(Path, {update, PathAsList, Timestamp, Opaque}) || Path <- AllPaths]
+        {Iteration, AllPaths} ->
+            lager:info("paths ~p",[AllPaths]),
+            {Iteration, [autotree_subs:warn_subscribers(Path, {update, PathAsList, Iteration, Opaque}) || Path <- AllPaths]}
     end.
 
--spec subscribe([any()], integer(), pid()) -> [{[any()], integer(), any()}].
-subscribe(PathAsList, Timestamp, Pid) ->
+-spec subscribe([any()], iteration(), pid()) -> [{[any()], iteration(), any()}].
+subscribe(PathAsList, Iteration, Pid) ->
+    lager:info("Subscribe"),
     %% Add the subscriber to the list BEFORE browsing so we don't miss any event
     autotree_subs:add_subscriber(PathAsList, Pid),
-    UpdatedSelf = case autotree_data:get_timestamp_and_opaque(PathAsList) of
-        {Time, Opaque} ->
+    UpdatedSelf = case autotree_data:get_iteration_and_opaque(PathAsList) of
+        {LastIteration, Opaque} ->
             if
-                Time > Timestamp ->
-                    [{PathAsList, Time, Opaque}];
+                LastIteration > Iteration ->
+                    [{PathAsList, LastIteration, Opaque}];
                 true ->
                     []
             end;
@@ -53,12 +59,14 @@ subscribe(PathAsList, Timestamp, Pid) ->
             []
     end,
     %% Browse current children state
-    UpdatedChildren = autotree_data:browse(PathAsList, Timestamp),
+    lager:info("Subscribe2"),
+    UpdatedChildren = autotree_data:browse(PathAsList, Iteration),
+    lager:info("Got ~p ~p", [UpdatedSelf, UpdatedChildren]),
     UpdatedSelf ++ UpdatedChildren.
 
--spec get_timestamp_and_opaque([any()]) -> {integer(), any()} | error.
-get_timestamp_and_opaque(PathAsList) ->
-    autotree_data:get_timestamp_and_opaque(PathAsList).
+-spec get_iteration_and_opaque([any()]) -> {iteration(), any()} | error.
+get_iteration_and_opaque(PathAsList) ->
+    autotree_data:get_iteration_and_opaque(PathAsList).
 
 start(_StartType, _StartArgs) ->
     autotree_sup:start_link().
@@ -73,54 +81,64 @@ stop(_State) ->
 -ifdef(TEST).
 autotree_subs_test() ->
     application:start(autotree),
-    Pid = spawn(fun() -> timer:sleep(100) end),
-    autotree_subs:add_subscriber(<<"toto">>, Pid),
-    ?assertEqual(lists:sort(ets:tab2list(autotree_subs_bag)), [{Pid,<<"toto">>},{<<"toto">>,Pid}]),
-    timer:sleep(150),
+    Pid = spawn(fun() -> timer:sleep(200) end),
+    autotree_subs:add_subscriber([<<"toto">>], Pid),
+    ?assertEqual(lists:sort(ets:tab2list(autotree_subs_bag)), [{Pid,[<<"toto">>]},{[<<"toto">>],Pid}]),
+    timer:sleep(100),
+    {It, _} = update([<<"toto">>], {1, test1}),
+    timer:sleep(120),
     ?assertEqual(ets:tab2list(autotree_subs_bag), []),
+    ?assertEqual({It, {1, test1}}, get_iteration_and_opaque([<<"toto">>])),
     application:stop(autotree).
 
 
 autotree_data_test() ->
     application:start(autotree),
-    update(["toto", "titi", "tata", "item1"], 1, test1),
-    update(["toto", "titi", "tata", "item2"], 2, test2),
-    update(["toto", "titi", "tata", "item2"], 3, test3),
-    update(["toto", "titi", "tata", "item3"], 2, test4),
-    update(["toti"], 4, test5),
+    {It, _ } = update(["toto", "titi", "tata", "item1"], {1, test1}),
+    update(["toto", "titi", "tata", "item2"], {2, test2}),
+    update(["toto", "titi", "tata", "item2"], {3, test3}),
+    update(["toto", "titi", "tata", "item3"], {2, test4}),
+    update(["toti"], {4, test5}),
     ?assertEqual(
-        lists:sort(subscribe(["toto", "titi", "tata"], 0, self())),
-        [{["toto","titi","tata","item1"],1, test1},
-                  {["toto","titi","tata","item2"],3, test3},
-                  {["toto","titi","tata","item3"],2, test4}]
+        [{["toto","titi","tata","item1"], It, {1, test1}},
+                  {["toto","titi","tata","item2"], It+2, {3, test3}},
+                  {["toto","titi","tata","item3"], It+3, {2, test4}}],
+        lists:sort(subscribe(["toto", "titi", "tata"], 0, self()))                  
     ),
     ?assertEqual(
-        lists:sort(subscribe(["toto", "titi", "tata", "item2"], 2, self())),
-        [{["toto","titi","tata","item2"],3, test3}]
+        [{["toto","titi","tata","item2"], It+2, {3, test3}}],
+        lists:sort(subscribe(["toto", "titi", "tata", "item2"], 0, self()))
     ),
     ?assertEqual(
-        lists:sort(subscribe(["toto", "titi", "tata", "item2"], 6, self())),
-        []
+        [],
+        lists:sort(subscribe(["toto", "titi", "tata", "item2"], It+2, self()))
     ),
     ?assertEqual(
-        update(["toto", "titi", "tata", "item2"], 2, test5),
+        update(["toto", "titi", "tata", "item2"], {2, test5}),
         too_late
     ),
-    update(["toto", "titi", "tata", "item2"], 4, test6),
+    update(["toto", "titi", "tata", "item2"], {4, test6}),
     receive
-        {update, Path, Time, Opaque} ->
+        {update, Path, NewIt, Opaque} ->
             ?assertEqual(Path, ["toto", "titi", "tata", "item2"]),
-            ?assertEqual(Time, 4),
-            ?assertEqual(Opaque, test6)
+            ?assertEqual(NewIt, It+6),
+            ?assertEqual(Opaque, {4, test6})
     after 0 ->
         throw(no_message_received)
     end,
+    lager:info("Pre subs"),
+    Subs = subscribe([], 0, self()),
+    lager:info("Subs are ~p", [Subs]),
     ?assertEqual(
-        lists:sort(subscribe([], 0, self())),
-        [{["toti"], 4, test5},
-                  {["toto", "titi", "tata", "item1"], 1, test1},
-                  {["toto", "titi", "tata", "item2"], 4, test6},
-                  {["toto", "titi", "tata", "item3"], 2, test4}]),
+        lists:sort(Subs),
+        [{["toti"], It+4, {4, test5}},
+                  {["toto", "titi", "tata", "item1"], It, {1, test1}},
+                  {["toto", "titi", "tata", "item2"], It+6, {4, test6}},
+                  {["toto", "titi", "tata", "item3"], It+3, {2, test4}}]),
+
+    {It2, _} = update(["toto", "titi"], {4, test5}),
+    ?assertEqual(It+7, It2),
+
     application:stop(autotree).
     
 -endif.

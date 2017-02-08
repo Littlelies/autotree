@@ -4,9 +4,9 @@
 
 -export([
     init_from_sup/0,
-    update/3,
+    update/2,
     browse/2,
-    get_timestamp_and_opaque/1
+    get_iteration_and_opaque/1
 ]).
 
 
@@ -20,7 +20,9 @@
          terminate/2,
          code_change/3]).
 
--record(state, {}).
+-record(state, {
+    iteration
+}).
 
 -define(ETS_BAG, autotree_data_bag).
 -define(ETS_BAG_INDEX, autotree_data_bag_index).
@@ -33,22 +35,22 @@
 %% API functions
 %% ===================================================================
 
--spec update([any()], integer(), any()) -> [[any()]] | drop.
-update(PathAsList, Timestamp, Opaque) ->
+-spec update([any()], any()) -> {integer(), [[any()]] | drop}.
+update(PathAsList, Opaque) ->
     %% The update must be done one at a time to avoid concurrent writes with bad timestamps
-    gen_server:call(?MODULE, {update, PathAsList, Timestamp, Opaque}).
+    gen_server:call(?MODULE, {update, PathAsList, Opaque}).
 
 -spec browse([any()], integer()) -> [{[any()], integer(), any()}].
-browse(PathAsList, Timestamp) ->
+browse(PathAsList, Iteration) ->
     %% Browse children
     L = ets:lookup(?ETS_BAG, PathAsList),
-    browse_items(L, Timestamp, []).
+    browse_items(L, Iteration, []).
 
--spec get_timestamp_and_opaque([any()]) -> {integer(), any()} | error.
-get_timestamp_and_opaque(PathAsList) ->
+-spec get_iteration_and_opaque([any()]) -> {integer(), any()} | error.
+get_iteration_and_opaque(PathAsList) ->
     case ets:lookup(?ETS_SET, PathAsList) of
-        [{_, Timestamp, Opaque}] ->
-            {Timestamp, Opaque};
+        [{_, Iteration, Opaque}] ->
+            {Iteration, Opaque};
         _ ->
             error
     end.
@@ -62,16 +64,17 @@ start_link() ->
 
 init([]) ->
     erlang:send_after(60 * 1000, self(), {gc}),
-    {ok, #state{}}.
+    {ok, #state{iteration = erlang:system_time(microsecond)}}.
 
 init_from_sup() ->
     ets:new(?ETS_SET, [set, named_table, public]),
     ets:new(?ETS_BAG, [duplicate_bag, named_table, public]), %% See: http://erlang.org/pipermail/erlang-questions/2011-October/061705.html
     ets:new(?ETS_BAG_INDEX, [set, named_table, public]).
 
-handle_call({update, PathAsList, Timestamp, Opaque}, _From, State) ->
-    AllPaths = update_at_each_step(lists:reverse(PathAsList), Timestamp, Opaque, true, true, [PathAsList]),
-    {reply, AllPaths, State};
+handle_call({update, PathAsList, Opaque}, _From, State) ->
+    Iteration = State#state.iteration,
+    AllPathsOrDrop = update_at_each_step(lists:reverse(PathAsList), Iteration, Opaque, true, [PathAsList]),
+    {reply, {Iteration, AllPathsOrDrop}, State#state{iteration = Iteration + 1}};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
@@ -95,93 +98,80 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %%====================================================================
 
-update_at_each_step(_Elements, _Timestamp, _Opaque, _IsFirst, drop, _Acc) ->
-    drop;
-update_at_each_step([], _Timestamp, _Opaque, _IsFirst, _ShallContinue, Acc) ->
+update_at_each_step([], _Iteration, _Opaque, _IsFirst, Acc) ->
     Acc;
-update_at_each_step([Element | Elements0], Timestamp, Opaque, IsFirst, ShallContinue, Acc) ->
+update_at_each_step([Element | Elements0], Iteration, Opaque, IsFirst, Acc) ->
     Elements = lists:reverse(Elements0),
     FullElements = Elements ++ [Element],
-    NewShallContinue = case ShallContinue of
-        true ->
-            case find_child_record(FullElements) of
-                false ->
-                    if
-                        IsFirst ->
-                            ets:insert(?ETS_SET, {FullElements, Timestamp, Opaque}),
-                            add_in_bag({Elements, Element, Timestamp, 0}, FullElements);
-                        true ->
-                            add_in_bag({Elements, Element, 0, Timestamp}, FullElements)
-                    end,
-                    true;
-                {Elements, Element, CurrentTimestamp, CurrentChildrenTimestamp} = OldElement ->
-                    if
-                        IsFirst ->
-                            %% Maybe update topic
+    ShallContinue = case find_child_record(FullElements) of
+        false ->
+            if
+                IsFirst ->
+                    ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
+                    add_in_bag({Elements, Element, Iteration, 0}, FullElements);
+                true ->
+                    add_in_bag({Elements, Element, 0, Iteration}, FullElements)
+            end,
+            true;
+        {Elements, Element, CurrentIteration, CurrentChildrenIteration} = OldElement ->
+            if
+                IsFirst ->
+                    %% Maybe update topic
+                    case ets:lookup(?ETS_SET, FullElements) of
+                        [] ->
+                            FullElements = Elements ++ [Element],
+                            ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
+                            add_in_bag({Elements, Element, Iteration, 0}, FullElements),
+                            true;
+                        [{_, _OldIteration, OldOpaque}] ->
                             if
-                                CurrentTimestamp < Timestamp ->
+                                OldOpaque < Opaque -> % http://erlang.org/doc/reference_manual/expressions.html#id81088
                                     FullElements = Elements ++ [Element],
-                                    ets:insert(?ETS_SET, {FullElements, Timestamp, Opaque}),
-                                    add_in_bag({Elements, Element, Timestamp, CurrentChildrenTimestamp}, FullElements),
+                                    ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
+                                    add_in_bag({Elements, Element, Iteration, CurrentChildrenIteration}, FullElements),
                                     delete_in_bag(OldElement),
                                     true;
-                                CurrentTimestamp =:= Timestamp ->
-                                    [{_, _, OldOpaque}] = ets:lookup(?ETS_SET, FullElements),
-                                    if
-                                        OldOpaque < Opaque -> % http://erlang.org/doc/reference_manual/expressions.html#id81088
-                                            FullElements = Elements ++ [Element],
-                                            ets:insert(?ETS_SET, {FullElements, Timestamp, Opaque}),
-                                            add_in_bag({Elements, Element, Timestamp, CurrentChildrenTimestamp}, FullElements),
-                                            delete_in_bag(OldElement),
-                                            true;
-                                        true ->
-                                            %% Another update is more recent at this topic, drop it
-                                            drop
-                                    end;
                                 true ->
                                     %% Another update is more recent at this topic, drop it
                                     drop
-                            end;
-                        CurrentChildrenTimestamp > Timestamp ->
-                            %% The rest is necessarily newer, drop it.
-                            %% This use case is DANGEROUS for clients,
-                            %% as they may be confused getting events out of order
-                            %% We continue the browsing to still alert clients
-                            false;
-                        true ->
-                            add_in_bag({Elements, Element, CurrentTimestamp, Timestamp}, FullElements),
-                            delete_in_bag(OldElement),
-                            true
-                    end
-            end;
-        false ->
-            false
+                            end
+                    end;
+                true ->
+                    add_in_bag({Elements, Element, CurrentIteration, Iteration}, FullElements),
+                    delete_in_bag(OldElement),
+                    true
+            end
     end,
-    update_at_each_step(Elements0, Timestamp, Opaque, false, NewShallContinue, [Elements | Acc]).
+    case ShallContinue of
+        drop ->
+            drop;
+        true ->
+            update_at_each_step(Elements0, Iteration, Opaque, false, [Elements | Acc])
+    end.
 
 browse_items([], _, Acc) ->
     Acc;
-browse_items([{Root, Item, ItemTimestamp, ChildrenTimestamp} | Items], Timestamp, Acc) ->
+browse_items([{Root, Item, ItemIteration, ChildrenIteration} | Items], Iteration, Acc) ->
     Acc1 = if
-        ItemTimestamp > Timestamp ->
+        ItemIteration > Iteration ->
             ItemPath = Root ++ [Item],
-            [{_, ItemLatestTimestamp, Opaque}] = ets:lookup(?ETS_SET, ItemPath),
-            [{ItemPath, ItemLatestTimestamp, Opaque} | Acc];
+            [{_, OldIteration, Opaque}] = ets:lookup(?ETS_SET, ItemPath),
+            [{ItemPath, OldIteration, Opaque} | Acc];
         true ->
             Acc
     end,
     Acc2 = if
-        ChildrenTimestamp > Timestamp ->
+        ChildrenIteration > Iteration ->
             L = ets:lookup(?ETS_BAG, Root ++ [Item]),
-            browse_items(L, Timestamp, Acc1);
+            browse_items(L, Iteration, Acc1);
         true ->
             Acc1
     end,
-    browse_items(Items, Timestamp, Acc2).
+    browse_items(Items, Iteration, Acc2).
 
-add_in_bag({Elements, Element, Timestamp, ChildrenTimestamp}, FullElements) ->
-    ets:insert(?ETS_BAG_INDEX, {FullElements, Elements, Element, Timestamp, ChildrenTimestamp}),
-    ets:insert(?ETS_BAG, {Elements, Element, Timestamp, ChildrenTimestamp}).
+add_in_bag({Elements, Element, Iteration, ChildrenIteration}, FullElements) ->
+    ets:insert(?ETS_BAG_INDEX, {FullElements, Elements, Element, Iteration, ChildrenIteration}),
+    ets:insert(?ETS_BAG, {Elements, Element, Iteration, ChildrenIteration}).
 
 %% we don't remove it from index, it will be overwritten
 delete_in_bag(Object) ->
@@ -190,8 +180,8 @@ delete_in_bag(Object) ->
 -spec find_child_record([any()]) -> tuple() | false.
 find_child_record(FullElements) ->
     case ets:lookup(?ETS_BAG_INDEX, FullElements) of
-        [{FullElements, Elements, Element, Timestamp, ChildrenTimestamp}] ->
-            {Elements, Element, Timestamp, ChildrenTimestamp};
+        [{FullElements, Elements, Element, Iteration, ChildrenIteration}] ->
+            {Elements, Element, Iteration, ChildrenIteration};
         _ ->
             false
     end.
