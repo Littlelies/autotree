@@ -38,13 +38,11 @@ update(PathAsList, Opaque) ->
         {_Iteration, drop} ->
             too_late;
         {Iteration, AllPaths} ->
-            lager:info("paths ~p",[AllPaths]),
             {Iteration, [autotree_subs:warn_subscribers(Path, {update, PathAsList, Iteration, Opaque}) || Path <- AllPaths]}
     end.
 
 -spec subscribe([any()], iteration(), pid()) -> [{[any()], iteration(), any()}].
 subscribe(PathAsList, Iteration, Pid) ->
-    lager:info("Subscribe"),
     %% Add the subscriber to the list BEFORE browsing so we don't miss any event
     autotree_subs:add_subscriber(PathAsList, Pid),
     UpdatedSelf = case autotree_data:get_iteration_and_opaque(PathAsList) of
@@ -59,9 +57,7 @@ subscribe(PathAsList, Iteration, Pid) ->
             []
     end,
     %% Browse current children state
-    lager:info("Subscribe2"),
     UpdatedChildren = autotree_data:browse(PathAsList, Iteration),
-    lager:info("Got ~p ~p", [UpdatedSelf, UpdatedChildren]),
     UpdatedSelf ++ UpdatedChildren.
 
 -spec get_iteration_and_opaque([any()]) -> {iteration(), any()} | error.
@@ -126,9 +122,7 @@ autotree_data_test() ->
     after 0 ->
         throw(no_message_received)
     end,
-    lager:info("Pre subs"),
     Subs = subscribe([], 0, self()),
-    lager:info("Subs are ~p", [Subs]),
     ?assertEqual(
         lists:sort(Subs),
         [{["toti"], It+4, {4, test5}},
