@@ -31,7 +31,6 @@
 %% it is their responsibility to make sure the event is not outdated already,
 %% and make sure they use margin when asking for a timestamp after deconnexion
 
-%% @todo: instead of timestamp, use a version number, so we can make sure it is monotonically increasing
 -spec update([any()], any()) -> too_late | {iteration(), [{[any()], integer()}]}.
 update(PathAsList, Opaque) ->
     case autotree_data:update(PathAsList, Opaque) of
@@ -41,6 +40,7 @@ update(PathAsList, Opaque) ->
             {Iteration, [autotree_subs:warn_subscribers(Path, {update, PathAsList, Iteration, Opaque}) || Path <- AllPaths]}
     end.
 
+%% @todo: add ability to subscribe to that particular path and not his children
 -spec subscribe([any()], iteration(), pid()) -> [{[any()], iteration(), any()}].
 subscribe(PathAsList, Iteration, Pid) ->
     %% Add the subscriber to the list BEFORE browsing so we don't miss any event
