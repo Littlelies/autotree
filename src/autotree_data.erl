@@ -4,7 +4,7 @@
 
 -export([
     init_from_sup/0,
-    update/2,
+    update/3,
     browse/2,
     get_iteration_and_opaque/1
 ]).
@@ -35,10 +35,10 @@
 %% API functions
 %% ===================================================================
 
--spec update([any()], any()) -> {integer(), [[any()]] | drop}.
-update(PathAsList, Opaque) ->
+-spec update([any()], any(), boolean()) -> {integer(), [[any()]] | drop, any()}.
+update(PathAsList, Opaque, FailIfExists) ->
     %% The update must be done one at a time to avoid concurrent writes with bad timestamps
-    gen_server:call(?MODULE, {update, PathAsList, Opaque}).
+    gen_server:call(?MODULE, {update, PathAsList, Opaque, FailIfExists}).
 
 -spec browse([any()], integer()) -> [{[any()], integer(), any()}].
 browse(PathAsList, Iteration) ->
@@ -71,10 +71,10 @@ init_from_sup() ->
     ets:new(?ETS_BAG, [duplicate_bag, named_table, public]), %% See: http://erlang.org/pipermail/erlang-questions/2011-October/061705.html
     ets:new(?ETS_BAG_INDEX, [set, named_table, public]).
 
-handle_call({update, PathAsList, Opaque}, _From, State) ->
+handle_call({update, PathAsList, Opaque, FailIfExists}, _From, State) ->
     Iteration = State#state.iteration,
-    AllPathsOrDrop = update_at_each_step(lists:reverse(PathAsList), Iteration, Opaque, true, [PathAsList]),
-    {reply, {Iteration, AllPathsOrDrop}, State#state{iteration = Iteration + 1}};
+    {AllPathsOrDrop, OldOpaque} = update_at_each_step(lists:reverse(PathAsList), Iteration, Opaque, true, [PathAsList], undefined, FailIfExists),
+    {reply, {Iteration, AllPathsOrDrop, OldOpaque}, State#state{iteration = Iteration + 1}};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
@@ -98,21 +98,22 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %%====================================================================
 
-update_at_each_step([], _Iteration, _Opaque, _IsFirst, Acc) ->
-    Acc;
-update_at_each_step([Element | Elements0], Iteration, Opaque, IsFirst, Acc) ->
+update_at_each_step([], _Iteration, _Opaque, _IsFirst, Acc, AccOpaque, _FailIfExists) ->
+    {Acc, AccOpaque};
+update_at_each_step([Element | Elements0], Iteration, Opaque, IsFirst, Acc, AccOpaque, FailIfExists) ->
     Elements = lists:reverse(Elements0),
     FullElements = Elements ++ [Element],
-    ShallContinue = case find_child_record(FullElements) of
+    {ShallContinue, CurrentOpaque} = case find_child_record(FullElements) of
         false ->
             if
                 IsFirst ->
                     ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
-                    add_in_bag({Elements, Element, Iteration, 0}, FullElements);
+                    add_in_bag({Elements, Element, Iteration, 0}, FullElements),
+                    {true, error};
                 true ->
-                    add_in_bag({Elements, Element, 0, Iteration}, FullElements)
-            end,
-            true;
+                    add_in_bag({Elements, Element, 0, Iteration}, FullElements),
+                    {true, not_applicable}
+            end;
         {Elements, Element, CurrentIteration, CurrentChildrenIteration} = OldElement ->
             if
                 IsFirst ->
@@ -122,31 +123,42 @@ update_at_each_step([Element | Elements0], Iteration, Opaque, IsFirst, Acc) ->
                             FullElements = Elements ++ [Element],
                             ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
                             add_in_bag({Elements, Element, Iteration, 0}, FullElements),
-                            true;
+                            {true, error};
                         [{_, _OldIteration, OldOpaque}] ->
                             if
                                 OldOpaque < Opaque -> % http://erlang.org/doc/reference_manual/expressions.html#id81088
-                                    FullElements = Elements ++ [Element],
-                                    ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
-                                    add_in_bag({Elements, Element, Iteration, CurrentChildrenIteration}, FullElements),
-                                    delete_in_bag(OldElement),
-                                    true;
+                                    case FailIfExists of
+                                        true ->
+                                            dont_update;
+                                        false ->                                    
+                                            FullElements = Elements ++ [Element],
+                                            ets:insert(?ETS_SET, {FullElements, Iteration, Opaque}),
+                                            add_in_bag({Elements, Element, Iteration, CurrentChildrenIteration}, FullElements),
+                                            delete_in_bag(OldElement)
+                                    end,
+                                    {true, OldOpaque};
                                 true ->
                                     %% Another update is more recent at this topic, drop it
-                                    drop
+                                    {drop, OldOpaque}
                             end
                     end;
                 true ->
                     add_in_bag({Elements, Element, CurrentIteration, Iteration}, FullElements),
                     delete_in_bag(OldElement),
-                    true
+                    {true, not_applicable}
             end
+    end,
+    NewOldOpaque = case CurrentOpaque of
+        not_applicable ->
+            AccOpaque;
+        _ ->
+            CurrentOpaque
     end,
     case ShallContinue of
         drop ->
-            drop;
+            {drop, NewOldOpaque};
         true ->
-            update_at_each_step(Elements0, Iteration, Opaque, false, [Elements | Acc])
+            update_at_each_step(Elements0, Iteration, Opaque, false, [Elements | Acc], NewOldOpaque, FailIfExists)
     end.
 
 browse_items([], _, Acc) ->
